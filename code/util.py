@@ -1,0 +1,195 @@
+from __future__ import absolute_import, division, print_function
+
+import os
+import numpy as np
+import torch
+import datetime
+import matplotlib.pyplot as plt
+
+from sklearn.metrics import accuracy_score, precision_score, f1_score, recall_score
+from sklearn.metrics import pairwise_distances
+from sklearn.manifold import TSNE
+from sklearn.cluster import KMeans
+from sklearn.metrics.cluster import normalized_mutual_info_score
+
+import collections
+import dill
+
+
+
+
+# get the current time string
+def get_time_string():
+    now = datetime.datetime.now()
+    current_datetime = now.strftime("%Y-%m-%d %H:%M:%S")
+    return current_datetime
+
+# Log results
+
+
+def log_result(logger, epoch, res):
+    logger.info('**************************** Test ****************************')
+    logger.info(f'best epoch:{epoch}')
+    for key, value in res.items():
+        logger.info(f'{key}: {value}')
+
+# Save configuration arguments to a file.
+
+
+def save_config(args, saved_path):
+    with open(saved_path, 'w') as f:
+        args_dict = vars(args)
+        for key, value in args_dict.items():
+            f.write(f"{key}={value}\n")
+
+# Plot 2D embedding using t-SNE and save the plot.
+
+
+def plot_embedding(data, label, title, path):
+    tsne = TSNE(n_components=2, init='pca', random_state=0)
+    data, label = tsne.fit_transform(data), np.array(label)
+
+    plt.scatter(data[:, 0], data[:, 1], s=5, c=label*10)
+    plt.axis('off')
+    plt.title(title, fontsize=16, y=-0.1)
+    plt.savefig(os.path.join(path, title+'.png'), transparent=True)
+
+# Get top k results based on nearest neighbors.
+def get_top_k_results(tmp, train_tmp, test_y, train_y, k):
+    top_train_idx = np.argpartition(
+        pairwise_distances(tmp, train_tmp), k, axis=1)[:, :k]
+
+    predict_labels = []
+    for train_idx in top_train_idx:
+        candiates = [train_y[t_idx] for t_idx in train_idx]
+        p_label = max(candiates, key=candiates.count)
+        predict_labels.append(p_label)
+
+    res = cal_knn_metrics(test_y, predict_labels)
+    return res
+
+
+def cal_knn_metrics(true_labels, predict_labels):
+    """
+    Computes accuracy, precision, recall, and F1 score based on the true and predicted labels.
+
+    Args:
+        true_labels (array-like): Ground truth labels.
+        predict_labels (array-like): Predicted labels.
+
+    Returns:
+        dict: Dictionary containing evaluation metrics.
+
+
+    """
+
+    return {'accu': accuracy_score(true_labels, predict_labels), 'precision': precision_score(true_labels, predict_labels, average='macro'), 'recall': recall_score(true_labels, predict_labels, average='macro'), 'f1': f1_score(true_labels, predict_labels, average='macro')}
+
+
+def cal_cluster_metric(embs, cohorts, seed):
+    '''
+    This function performs clustering on the embeddings and computes purity, normalized mutual information,
+    and Rand Index scores to evaluate clustering performance.
+
+    Args:
+        embs (array-like): Embeddings of data points.
+        cohorts (array-like): True labels.
+        seed (int): Random seed for reproducibility.
+
+    Returns:
+        tuple: Tuple containing purity, normalized mutual information, and Rand Index scores.
+    '''
+
+    # Calculate purity of clustering results.
+    def purity(result, label):
+        total_num = len(label)
+        cluster_counter = collections.Counter(result)
+        original_counter = collections.Counter(label)
+        t = []
+        for k in cluster_counter:
+            p_k = []
+            for j in original_counter:
+                count = 0
+                for i in range(len(result)):
+                    if result[i] == k and label[i] == j:  # 求交集
+                        count += 1
+                p_k.append(count)
+            temp_t = max(p_k)
+            t.append(temp_t)
+        return sum(t)/total_num
+
+    # Calculate Rand Index of clustering results.
+    def rand_index(result, label):
+        total_num = len(label)
+
+        TP = TN = FP = FN = 0
+        for i in range(total_num):
+            for j in range(i + 1, total_num):
+                if label[i] == label[j] and result[i] == result[j]:
+                    TP += 1
+                elif label[i] != label[j] and result[i] != result[j]:
+                    TN += 1
+                elif label[i] != label[j] and result[i] == result[j]:
+                    FP += 1
+                elif label[i] == label[j] and result[i] != result[j]:
+                    FN += 1
+
+        return 1.0*(TP + TN)/(TP + FP + FN + TN)
+
+    clusters = KMeans(n_clusters=len(set(cohorts)),
+                      random_state=seed).fit_predict(embs)
+    me_purity = purity(clusters, cohorts)
+    me_nmi = normalized_mutual_info_score(clusters, cohorts)
+    me_ri = rand_index(clusters, cohorts)
+
+    return me_purity, me_nmi, me_ri
+
+
+# Load data from a pickle file.
+def read_pkl(path):
+    with open(path, 'rb') as f:
+        data = dill.load(f)
+    return data
+
+'''
+from transformers import BertTokenizer, BertModel
+# Convert the description generated by ChatGPT to embeddings using BERT.
+def get_text_emb():
+    # Load pre-trained BERT tokenizer and model
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    model = BertModel.from_pretrained('bert-base-uncased')
+
+    # Load ChatGPT responses
+    base_dir = '../data/chatgpt_desc/'
+    file_dict = {'responses_diag.pkl': 'diag_desc_emb.pkl', 'responses_proce.pkl': 'proce_desc_emb.pkl',
+                 'responses_atc.pkl': 'atc_desc_emb.pkl'}
+
+    for file_name, save_name in file_dict.items():
+        responses = read_pkl(base_dir+file_name)
+        paragraphs = {}
+        for i, response in enumerate(responses):
+            text = response[1][0]['message']['content']
+            paragraphs[response[2]] = text
+
+        # Process the paragraph and generate the embedding
+        paragraph_embeddings = {}
+        for id, paragraph in paragraphs.items():
+
+            # Tokenize the sentence and convert to tensor
+            inputs = tokenizer(paragraph, return_tensors='pt',
+                               padding=True, truncation=True)
+
+            # Pass the tokenized inputs through the model
+            with torch.no_grad():
+                outputs = model(**inputs)
+
+            # Extract the output embeddings (last hidden states)
+            embeddings = outputs.last_hidden_state
+
+            # Calculate the mean of embeddings to get sentence embedding
+            sentence_embedding = torch.mean(embeddings, dim=1).squeeze()
+
+            paragraph_embeddings[id] = sentence_embedding
+
+        dill.dump(paragraph_embeddings, open(base_dir+save_name, 'wb'))
+'''
